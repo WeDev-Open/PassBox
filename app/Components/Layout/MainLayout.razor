@@ -1,0 +1,274 @@
+﻿@using System.Security
+
+@inherits LayoutComponentBase
+@inject ISecurityService security
+@inject PasswordDatabaseService dbService
+@* @inject NavigationManager nav *@
+
+@* <MApp> *@
+<div class="page">
+    @if (IsShow)
+    {
+        @Body
+
+        <MFooter Padless App>
+            <MBottomNavigation @bind-Value="BottomNavValue" Color="#512BD4" Grow>
+                <MButton Href="/" IsActive="true">
+                    <span>Home</span>
+                    <MIcon>mdi-history</MIcon>
+                </MButton>
+
+                @* <MButton Href="setting"> *@
+                @*     <span>Settings</span> *@
+                @*     <MIcon>mdi-heart</MIcon> *@
+                @* </MButton> *@
+
+            </MBottomNavigation>
+        </MFooter>
+    }
+    else{
+        <MMain>
+            <MContainer Fluid>
+                <p>
+                    Passbox implements security protection based on biometric technology and requires user authorization before use.
+                </p>
+                <p>
+                    <MButton OnClick="OnEnterAsync">Authorized entry</MButton>
+                </p>
+                <p>
+                    @Msg
+                </p>
+                <MOverlay Value="overlay">
+                    <MProgressCircular indeterminate Size="64" Color="green"></MProgressCircular>
+                </MOverlay>
+            </MContainer>
+        </MMain>
+    }
+</div>
+@* </MApp> *@
+@code{
+    bool overlay = false;
+    public bool IsShow { get; set; }
+    public string Msg { get; set; }
+    public StringNumber BottomNavValue = 0;
+    private async Task OnEnterAsync()
+    {
+        string dbpwd = null;
+        overlay = true;
+
+        try
+        {
+            // 授权（网络 I/O 操作，直接 await 即可，不会阻塞 UI 线程）
+            var auth = await security.AuthenticateAsync("Authorized entry").ConfigureAwait(false);
+            if (!auth.IsSucceeded)
+            {
+                // 切回 UI 线程更新界面
+                await InvokeAsync(() =>
+                {
+                    IsShow = false;
+                    Msg = auth.Msg;
+                    StateHasChanged();
+                });
+                return;
+            }
+
+            // 构造文件路径
+            string pwdFileName = $"{GlobalData.DBAlias}.bin";
+            string saveFile = Path.Combine(GlobalData.DirPath, pwdFileName);
+
+            // 判断数据库文件是否存在（文件 I/O 同样是异步的）
+            if (!File.Exists(GlobalData.DBPath))
+            {
+                // 将 CPU 密集型操作放入后台线程
+                dbpwd = await Task.Run(() =>
+                {
+                    // 生成盐、初始密码（CPU 密集型操作）
+                    string salt = PasswordGenerator.GenerateSaltBase64();
+                    string initKey = GlobalData.GetDeviceId();
+                    string initPwd = PasswordGenerator.GeneratePassword(initKey, salt);
+                    return initPwd;
+                }).ConfigureAwait(false);
+
+                // 加密操作也移到后台线程
+                string savePwd = await Task.Run(() =>
+                {
+                    return security.Encrypt(GlobalData.DBAlias, dbpwd);
+                }).ConfigureAwait(false);
+
+                // 异步写入文件
+                await File.WriteAllTextAsync(saveFile, savePwd, System.Text.Encoding.UTF8).ConfigureAwait(false);
+            }
+            else
+            {
+                // 读取文件内容和解密操作
+                string savePwd = await File.ReadAllTextAsync(saveFile, System.Text.Encoding.UTF8).ConfigureAwait(false);
+                dbpwd = await Task.Run(() =>
+                {
+                    return security.Decrypt(GlobalData.DBAlias, savePwd);
+                }).ConfigureAwait(false);
+            }
+
+            // 构造 SecureString 的操作放在后台线程也可考虑，不过通常构造 SecureString 操作开销较小，
+            // 这里依然直接构造，然后切回 UI 线程执行数据库初始化
+            using (var securePwd = new SecureString())
+            {
+                foreach (char c in dbpwd)
+                {
+                    securePwd.AppendChar(c);
+                }
+                securePwd.MakeReadOnly();
+
+                // 假设 Init 方法不会阻塞 UI 线程（如果 Init 内部操作较重，也可考虑用 Task.Run 包裹）
+                await Task.Run(() => dbService.Init(GlobalData.DBPath, securePwd)).ConfigureAwait(false);
+            }
+
+            // 回到 UI 线程更新界面
+            await InvokeAsync(() =>
+            {
+                IsShow = true;
+                StateHasChanged();
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Initialization error: {ex.Message}");
+            await InvokeAsync(() =>
+            {
+                IsShow = false;
+                Msg = "An error occurred during initialization. Please try again.";
+                StateHasChanged();
+            });
+        }
+        finally
+        {
+            // 将清除敏感字符串的操作放入后台线程
+            await Task.Run(() => ClearString(ref dbpwd)).ConfigureAwait(false);
+
+            // 更新 overlay 状态
+            await InvokeAsync(() =>
+            {
+                overlay = false;
+                StateHasChanged();
+            });
+        }
+    }
+
+    /// <summary>
+    /// 清除字符串内容，防止敏感信息残留在内存中。
+    /// </summary>
+    /// <param name="str">要清除的字符串，清除后将置为 null。</param>
+    private unsafe void ClearString(ref string str)
+    {
+        if (str == null)
+        {
+            return;
+        }
+
+        fixed (char* ptr = str)
+        {
+            for (int i = 0; i < str.Length; i++)
+            {
+                ptr[i] = '\0';
+            }
+        }
+        str = null;
+    }
+
+    // async void OnEnter()
+    // {
+    //         string dbpwd = null;
+
+    //         try
+    //         {
+    //             overlay = true;
+
+    //             //授权
+    //             var auth = await security.AuthenticateAsync("Authorized entry");
+
+    //             if (!auth.IsSucceeded)
+    //             {
+    //                 IsShow = false;
+    //                 Msg = auth.Msg;
+
+    //                 return;
+    //             }
+
+    //             string pwdFileName = $"{GlobalData.DBAlias}.bin";
+    //             var saveFile = Path.Combine(GlobalData.DirPath, pwdFileName);
+
+    //             //判断数据库文件是否存在，以判断 是否为第一次使用
+    //             if (!File.Exists(GlobalData.DBPath))
+    //             {
+    //                 //动态生成初始密码
+    //                 //加密
+    //                 //存储密码
+    //                 var salt = PasswordGenerator.GenerateSaltBase64();
+
+    //                 var initKey = GlobalData.GetDeviceId();
+
+    //                 var initPwd = PasswordGenerator.GeneratePassword(initKey, salt);
+
+    //                 dbpwd = initPwd;
+
+    //                 var savePwd = security.Encrypt(GlobalData.DBAlias, initPwd);
+
+    //                 await File.WriteAllTextAsync(saveFile, savePwd, System.Text.Encoding.UTF8);
+    //             }
+    //             else
+    //             {
+    //                 //提取文件
+    //                 //解密db密码
+    //                 var savePwd = await File.ReadAllTextAsync(saveFile, System.Text.Encoding.UTF8);
+    //                 dbpwd = security.Decrypt(GlobalData.DBAlias, savePwd);
+    //             }
+
+    //             //初始化数据库
+    //             //显示界面
+    //             // 安全初始化数据库
+    //             using (var securePwd = new SecureString())
+    //             {
+    //                 foreach (char c in dbpwd)
+    //                 {
+    //                     securePwd.AppendChar(c);
+    //                 }
+    //                 securePwd.MakeReadOnly();
+    //                 dbService.Init(GlobalData.DBPath, securePwd);
+    //             }
+
+    //             IsShow = true;
+    //         }
+    //         catch (Exception ex)
+    //         {
+    //             Console.WriteLine($"Initialization error: {ex.Message}");
+    //             IsShow = false;
+    //             Msg = "An error occurred during initialization. Please try again.";
+    //         }
+    //         finally
+    //         {
+    //             // 清理内存中的密码
+    //             if (dbpwd != null)
+    //             {
+    //                 unsafe
+    //                 {
+    //                     fixed (char* ptr = dbpwd)
+    //                     {
+    //                         for (int i = 0; i < dbpwd.Length; i++)
+    //                         {
+    //                             ptr[i] = '\0';
+    //                         }
+    //                     }
+    //                 }
+
+    //                 dbpwd = null;
+    //             }
+
+    //             overlay = false;
+    //             StateHasChanged();
+    //         }
+       
+    // }
+    // void NavLink(string href)
+    // {
+    //     nav.NavigateTo(href);
+    // }
+}

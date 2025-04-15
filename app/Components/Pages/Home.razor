@@ -1,0 +1,516 @@
+﻿@page "/"
+@using Newtonsoft.Json
+@using System.Text
+
+@inject SSEServerService sever
+
+@inject ISecurityService security
+@inject PasswordDatabaseService dbService
+<MApp>
+    <MMain Style="height: calc(100vh - 64px); overflow: auto;">
+        <MSnackbar Action="Close" @bind-Value="snackBar" Centered Light Color="deep-purple accent-4" >
+            @alertMsg
+        </MSnackbar>
+        <MAppBar App Fixed>
+            <MToolbarTitle>
+                <PBlockText Primary="Passbox">
+                    <SecondaryContent>
+                        @(string.IsNullOrWhiteSpace(scanAPI) ? "" : $"Host:{scanAPI}")
+                    </SecondaryContent>
+
+                </PBlockText>
+            </MToolbarTitle>
+            <MSpacer></MSpacer>
+
+            <MButton Icon>
+                <MIcon>mdi-magnify</MIcon>
+            </MButton>
+            <MButton Icon OnClick="()=> {dialog =true;entry=new PasswordEntry();}">
+                <MIcon Color="red">mdi-plus</MIcon>
+            </MButton>
+
+            <MButton Icon OnClick="StartServer">
+                <MIcon Color="@serverColor">mdi-server</MIcon>
+            </MButton>
+            @*  <MButton Icon OnClick="()=>showScan=true">
+                <MIcon>mdi-qrcode-scan</MIcon>
+            </MButton> *@
+        </MAppBar>
+        <MCard Class="overflow-auto"
+        Style="height: 100%; width: 100%;margin: 0 auto"
+        Id="infinite-scroll-usage">
+            <MList>
+                @foreach (var item in _items)
+                {
+                    <MListItem Link OnClick="()=>SendToClient(item)">
+                        <MListItemAvatar>
+                            @*  <MIcon Class="@item.IconClass">
+                                @item.Icon
+                            </MIcon> *@
+                            <MIcon Color="blue">
+                                mdi-lock
+                            </MIcon>
+                        </MListItemAvatar>
+                        <MListItemContent>
+                            <MListItemTitle>
+                                @item.Title
+                            </MListItemTitle>
+                            <MListItemSubtitle>
+                                @item.Username
+                            </MListItemSubtitle>
+                        </MListItemContent>
+                        <MListItemAction>
+                            <MButton Icon OnClick="()=>ShowPassword(item.Alias,item.EncryptedPassword)">
+                                <MIcon color="grey lighten-1">
+                                    mdi-eye-circle
+                                </MIcon>
+                            </MButton>
+                            <MButton Icon OnClick="()=>SendToClient(item)">
+                                <MIcon color="green lighten-1">
+                                    mdi-login-variant
+                                </MIcon>
+                            </MButton>
+                            <MMenu Bottom OffsetY @key="item.Id">
+                                <ActivatorContent>
+                                    <MButton Dark Icon @attributes="@context.Attrs" Color="black">
+                                        <MIcon>mdi-dots-vertical</MIcon>
+                                    </MButton>
+                                </ActivatorContent>
+                                <ChildContent>
+                                    <MList>
+                                        <MListItem OnClick="()=>{dialog=true;entry=item;}">
+                                            <MListItemAvatar>
+                                                <MIcon Color="blue">
+                                                    mdi-text-box-edit
+                                                </MIcon>
+                                            </MListItemAvatar>
+                                            <MListItemTitle>
+                                                Edit
+                                            </MListItemTitle>
+                                        </MListItem>
+                                        <MListItem OnClick="()=>DeletePassword(item.Id)">
+                                            <MListItemAvatar>
+                                                <MIcon Color="red">
+                                                    mdi-delete-alert
+                                                </MIcon>
+                                            </MListItemAvatar>
+                                            <MListItemTitle>
+                                                Delete
+                                            </MListItemTitle>
+                                        </MListItem>
+                                    </MList>
+                                </ChildContent>
+                            </MMenu>
+                        </MListItemAction>
+                    </MListItem>
+                }
+            </MList>
+            <MInfiniteScroll OnLoad="@OnLoad" 
+            Parent="#infinite-scroll-usage">
+            </MInfiniteScroll>
+
+        </MCard>
+
+        <MDialog Value="dialog" MaxWidth="500" Persistent Fullscreen>
+            <MCard>
+                <MCardText Class="pt-3">
+                    <MTextField TValue="string" Label="Title" @bind-Value="@entry.Title"></MTextField>
+                    <MTextField TValue="string" Label="Account" @bind-Value="@entry.Username"></MTextField>
+                    <MTextField TValue="string" Label="Password" @bind-Value="@entry.Password"></MTextField>
+                </MCardText>
+
+                <MCardActions>
+                    <MSpacer></MSpacer>
+
+                    <MButton Text Color="primary" OnClick="Save">
+                        Save
+                    </MButton>
+                    <MButton Text Color="primary" OnClick="()=>dialog=false">
+                        Close
+                    </MButton>
+                </MCardActions>
+            </MCard>
+        </MDialog>
+
+
+        <MDialog @bind-Value="pwDialog" Transition="dialog-top-transition" OnOutsideClick="ClearDialogShowPassword">
+            <ChildContent>
+                <MCard Class="pt-4 mx-auto">
+                    <MCardText>
+                        <MSpacer></MSpacer>
+                        <PCopyableText Class="font-weight-black text-h4" Style="max-width:250px">
+                            @dialogShowPW
+                        </PCopyableText>
+                    </MCardText>
+                </MCard>
+            </ChildContent>
+        </MDialog>
+        <MDialog @bind-Value="showScan" Transition="dialog-top-transition" Fullscreen>
+            <ChildContent>
+                <BarcodeReader Close="()=>showScan=false" ScanResult="ScanAPIResult" ScanBtnTitle="Scan" ResetBtnTitle="Reset" CloseBtnTitle="Close">
+                </BarcodeReader>
+            </ChildContent>
+        </MDialog>
+    </MMain>
+</MApp>
+@code {
+    private bool dialog;
+    private bool pwDialog;
+    private string dialogShowPW=string.Empty; 
+    private bool snackBar;
+
+    private bool showScan;
+    public string scanAPI;
+    private string serverColor = "black";
+
+    PasswordEntry entry = null;
+
+    int pageSize = 10;
+    int pageIndex = 0;
+    int total = 0;
+
+    private string alertMsg;
+
+    private List<PasswordEntry> _items = new List<PasswordEntry>();
+
+    protected override void OnInitialized()
+    {
+
+    }
+
+    private async Task OnLoad(InfiniteScrollLoadEventArgs args)
+    {
+        try
+        {
+            if (total==0)
+            {
+                total = dbService.GetCount();
+            }
+            Console.WriteLine("OnLoad called...");
+            var append = await Query();
+            args.Status = append.Count == 0 ? InfiniteScrollLoadStatus.Empty : InfiniteScrollLoadStatus.Ok;
+            _items.AddRange(append);
+
+            StateHasChanged(); 
+
+        }
+        catch (Exception ex)
+        {
+            args.Status = InfiniteScrollLoadStatus.Error;
+            Console.WriteLine($"Error during OnLoad: {ex.Message}");
+        }
+    }
+
+    private async Task<List<PasswordEntry>> Query(string search=null)
+    {
+        if (_items.Count < total)
+        {
+            pageIndex++;
+        }
+        else{
+            return new List<PasswordEntry>();
+        }
+
+        var data = dbService.Search(search, pageSize, pageIndex);
+
+        return data;
+    }
+
+    async void DeletePassword(Guid id)
+    { 
+        try
+        {
+            //授权
+            var auth = await security.AuthenticateAsync("Delete data authorization");
+            if (!auth.IsSucceeded)
+            {
+                ShowAlert(auth.Msg);
+                return;
+            }
+
+            dbService.Delete(id);
+
+            var item = _items.Find(c=>c.Id==id);
+
+            _items.Remove(item);
+            // pageIndex = 0;
+            // total = 0;
+            // _items.Clear();
+
+            ShowAlert("Deleted");
+        }
+        catch (Exception ex)
+        {
+            ShowAlert(ex.Message);
+        }
+
+        StateHasChanged();
+    }
+
+    void ClearDialogShowPassword()
+    { 
+        pwDialog = false;
+
+        if (string.IsNullOrEmpty(dialogShowPW)) return;
+
+        unsafe
+        {
+            fixed (char* ptr = dialogShowPW)
+            {
+                // 覆盖字符串内存为 0
+                CryptographicOperations.ZeroMemory(new Span<byte>(ptr, dialogShowPW.Length * sizeof(char)));
+            }
+        }
+
+        dialogShowPW = null;
+        // 强制触发 GC（可选）
+        // GC.Collect();
+        // GC.WaitForPendingFinalizers();
+    }
+
+    async void ShowPassword(string alias,string encryPassword)
+    {
+        try
+        {
+            //授权
+            var auth = await security.AuthenticateAsync("View password authorization");
+            if (!auth.IsSucceeded)
+            {
+                ShowAlert(auth.Msg);
+            }
+            else
+            {
+                dialogShowPW = security.Decrypt(alias, encryPassword);
+
+                pwDialog = true;
+                // 返回一个成功的回调
+                StateHasChanged();
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowAlert(ex.Message);
+        }
+
+    }
+
+    async void Save()
+    { 
+        if (entry is null)
+        {
+            ShowAlert("Save Failed");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(entry.Title))
+        {
+            ShowAlert("Title is required");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(entry.Username))
+        {
+            ShowAlert("Account is required");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(entry.Password))
+        {
+            ShowAlert("Password is required");
+            return;
+        }
+
+        // bool isNew = false;
+        // if (entry.Id == Guid.Empty)
+        // {
+        //     isNew = true;
+        //     entry.Id = Guid.NewGuid();
+        // }
+
+        // entry.Alias = entry.Id.ToString();
+
+        bool isNew = entry.Id == Guid.Empty;
+        if (isNew)
+        {
+            entry.Id = Guid.NewGuid();
+            entry.Alias = entry.Id.ToString();
+        }
+
+        //授权
+        //加密
+
+        try
+        {//授权
+            var auth = await security.AuthenticateAsync("Encrypted data authorization");
+            if (!auth.IsSucceeded)
+            {
+                ShowAlert(auth.Msg);
+                return;
+            }
+
+            entry.EncryptedPassword = security.Encrypt(entry.Alias, entry.Password);
+
+            // 安全清理内存中的明文密码
+            unsafe
+            {
+                fixed (char* ptr = entry.Password)
+                {
+                    CryptographicOperations.ZeroMemory(new Span<byte>(ptr, entry.Password.Length * sizeof(char)));
+                }
+            }
+
+            entry.Password = string.Empty;
+
+            if (isNew)
+            {
+                dbService.Add(entry);
+
+                total = dbService.GetCount();
+                _items.Add(entry);
+            }
+            else
+            {
+                dbService.Update(entry);
+            }
+
+            pageIndex = 0;
+            _items.Clear();
+
+            var append = await Query();
+            _items.AddRange(append);
+
+            entry = null;
+
+            dialog = false;
+
+            ShowAlert("Saved.");
+        }
+        catch (Exception ex)
+        {
+            ShowAlert(ex.Message);
+        }
+
+        StateHasChanged();
+    }
+
+    void ShowAlert(string msg)
+    {
+        snackBar = true;
+        alertMsg = msg;
+        StateHasChanged();
+    }
+
+    async void ScanAPIResult(string result)
+    {
+        scanAPI = result;
+        //string decompressedString = LZString.DecompressFromBase64(result);
+
+        //await rtc.InitConnection(result);
+
+        showScan = false;
+    }
+
+    void StartServer()
+    {
+
+        sever.ShowMsg = async p => await MainThread.InvokeOnMainThreadAsync(() => 
+        {
+            if (serverColor!="green")
+            {
+                scanAPI = $"{sever.IP}:{sever.Port}";
+                serverColor = "green";
+            }
+
+            ShowAlert(p);
+
+        });
+
+        Task.Run(async () =>
+        {
+            try
+            {
+                await sever.StartServer().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"######## EXCEPTION: {ex.Message}");
+                // 可选：触发取消逻辑或重试机制
+            }
+        });
+        // new Thread(async () =>
+        //     {
+        //         try
+        //         {
+        //             await sever.StartServer();
+        //         }
+        //         catch (Exception ex)
+        //         {
+        //             System.Diagnostics.Debug.WriteLine($"######## EXCEPTION: {ex.Message}");
+        //         }
+        //     }).Start();
+
+
+        //ShowAlert("Server Started.");
+    }
+
+    async void SendToClient(PasswordEntry entry)
+    { 
+
+        try
+        {
+            if (sever.ServerIpEndpoint==null)
+            {
+                ShowAlert("Please start server first");
+                return;
+            }
+
+            //授权
+            var auth = await security.AuthenticateAsync("Send Info authorization");
+            if (!auth.IsSucceeded)
+            {
+                ShowAlert(auth.Msg);
+            }
+            else
+            {
+                var decryPW = security.Decrypt(entry.Alias, entry.EncryptedPassword);
+                if (string.IsNullOrEmpty(decryPW)) return;
+
+                var json = JsonConvert.SerializeObject(new { Account = entry.Username, Password = decryPW }, new JsonSerializerSettings{});
+                if (string.IsNullOrEmpty(json)) return;
+
+                sever.UpdateSelectedData(Convert.ToBase64String(Encoding.UTF8.GetBytes(json)));
+                //sever.UpdateSelectedData(json);
+                
+
+                unsafe
+                {
+                    fixed (char* ptr = decryPW)
+                    {
+                        // 覆盖字符串内存为 0
+                        CryptographicOperations.ZeroMemory(new Span<byte>(ptr, decryPW.Length * sizeof(char)));
+                    }
+                }
+
+                
+
+                unsafe
+                {
+                    fixed (char* ptr = json)
+                    {
+                        // 覆盖字符串内存为 0
+                        CryptographicOperations.ZeroMemory(new Span<byte>(ptr, json.Length * sizeof(char)));
+                    }
+                }
+
+                decryPW = null;
+                json = null;
+
+                ShowAlert("Sended.");
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowAlert(ex.Message);
+        }
+    }
+}
