@@ -1,4 +1,4 @@
-# WeTools.PassBox
+# PassBox
 
 整体思路：
 1. app 作为 服务端，保存数据，推送数据，提供http服务
